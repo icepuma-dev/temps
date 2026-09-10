@@ -61,6 +61,10 @@ pub enum TempsError {
     /// such as when adding months to January 31st would result in
     /// February 31st (which doesn't exist).
     ///
+    /// When a `context` is present it is rendered after the message: it carries
+    /// the underlying backend's own diagnosis (jiff's range errors, say), which
+    /// used to be captured and then never shown to anyone.
+    ///
     /// # Example
     ///
     /// ```
@@ -68,7 +72,10 @@ pub enum TempsError {
     ///
     /// let err = TempsError::date_calculation("Month overflow");
     /// ```
-    #[error("Date calculation error: {message}")]
+    #[error(
+        "Date calculation error: {message}{}",
+        .context.as_deref().map(|cause| format!(": {cause}")).unwrap_or_default()
+    )]
     DateCalculationError {
         /// The specific calculation error message
         message: String,
@@ -337,6 +344,7 @@ pub fn rich_errors_to_temps_error(
     errors: Vec<chumsky::error::Rich<'_, crate::lexer::Token<'_>>>,
 ) -> TempsError {
     use ariadne::{Color, Config, Label, Report, ReportKind, Source};
+    use chumsky::error::RichReason;
 
     // Token spans are BYTE offsets, but ariadne's `Source` indexes by
     // CHARACTER. Feeding one to the other mislocates the caret on any
@@ -358,14 +366,30 @@ pub fn rich_errors_to_temps_error(
         );
     }
 
-    let position = errors
-        .first()
-        .map(|e| byte_to_char(e.span().start))
-        .unwrap_or(0);
+    // Prefer a deliberate diagnostic. The grammar raises `Rich::custom` exactly
+    // where it *knows* what is wrong — an impossible calendar date, an amount
+    // too large for an `i64`, a timezone offset out of range — whereas the
+    // errors it competes with are "expected X, found Y" from whichever
+    // alternative happened to read furthest into the input. Ranking those
+    // alternatives is chumsky's job; deciding which survivor is worth showing
+    // to a user is ours, and a stated reason beats a guess.
+    let mut ordered: Vec<&chumsky::error::Rich<'_, crate::lexer::Token<'_>>> = errors
+        .iter()
+        .filter(|e| matches!(e.reason(), RichReason::Custom(_)))
+        .collect();
+    ordered.extend(
+        errors
+            .iter()
+            .filter(|e| !matches!(e.reason(), RichReason::Custom(_))),
+    );
+
+    // A parse that failed always carries at least one error; the `0` is only
+    // for the empty vector.
+    let position = ordered.first().map_or(0, |e| byte_to_char(e.span().start));
 
     let source_id: &str = "input";
     let mut rendered = String::new();
-    for err in &errors {
+    for err in &ordered {
         let span = err.span();
         let start = byte_to_char(span.start);
         let end = byte_to_char(span.end).max(start + 1).min(char_len.max(1));

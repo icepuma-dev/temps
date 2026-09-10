@@ -795,3 +795,117 @@ fn civil_datetime_input_is_accepted_by_the_pinned_provider() {
     let provider = JiffProvider::at(fixed.clone());
     assert_eq!(provider.now(), fixed);
 }
+
+// ===== Pin, zone, and error-message contracts =====
+
+/// A pinned provider answers every zone-less expression in its own zone.
+///
+/// The absolute and bare-date arms used to resolve against `TimeZone::system()`
+/// while the relative, day and time arms used the pinned zone. One provider
+/// could therefore return two instants nine hours apart for the same wall
+/// clock, and the answer depended on the process `TZ` rather than on the
+/// instant it had been pinned to — which is exactly what `at` promises not to
+/// happen.
+#[test]
+fn a_pinned_provider_resolves_every_expression_in_its_own_zone() {
+    let provider = JiffProvider::at(at_zone("Asia/Tokyo", 2024, 6, 1, 10, 0));
+
+    // The same wall clock, named two ways: a day reference with a time, and an
+    // absolute datetime.
+    assert_eq!(
+        resolve(&provider, "tomorrow at 9:00 am", Language::English).timestamp(),
+        resolve(&provider, "2024-06-02 09:00", Language::English).timestamp(),
+    );
+    assert_eq!(
+        resolve(&provider, "tomorrow", Language::English).timestamp(),
+        resolve(&provider, "2024-06-02", Language::English).timestamp(),
+    );
+    assert_eq!(
+        resolve(&provider, "today", Language::English).timestamp(),
+        resolve(&provider, "2024-06-01", Language::English).timestamp(),
+    );
+
+    // Every answer is labelled with the pinned zone — including the ones that
+    // name their own offset, which are converted into it.
+    for input in [
+        "tomorrow at 9:00 am",
+        "2024-06-02 09:00",
+        "tomorrow",
+        "2024-06-02",
+        "2024-06-02T09:00:00Z",
+        "in 2 hours",
+        "9:00 am",
+    ] {
+        assert_eq!(
+            resolve(&provider, input, Language::English)
+                .time_zone()
+                .iana_name(),
+            Some("Asia/Tokyo"),
+            "wrong zone for {input:?}"
+        );
+    }
+}
+
+/// A date with no time still honours the zone the expression names: the
+/// timezone field used to be read only when an hour was present.
+#[test]
+fn a_date_only_absolute_honours_its_timezone() {
+    let midnight_in = |timezone| {
+        JiffProvider::new()
+            .parse_expression(TimeExpression::Absolute(AbsoluteTime {
+                year: 2024,
+                month: 1,
+                day: 15,
+                hour: None,
+                minute: None,
+                second: None,
+                nanosecond: None,
+                timezone,
+            }))
+            .expect("a real date resolves")
+            .timestamp()
+    };
+
+    assert_eq!(
+        midnight_in(Some(Timezone::Utc)).to_string(),
+        "2024-01-15T00:00:00Z"
+    );
+    assert_eq!(
+        midnight_in(Some(Timezone::Offset {
+            total_minutes: -300
+        }))
+        .to_string(),
+        "2024-01-15T05:00:00Z",
+        "-05:00 midnight is five hours after UTC midnight"
+    );
+    assert_eq!(
+        midnight_in(Some(Timezone::Offset { total_minutes: 330 })).to_string(),
+        "2024-01-14T18:30:00Z",
+        "+05:30 midnight is the previous UTC day"
+    );
+}
+
+/// A range-limit failure used to print "Date calculation error: Date
+/// calculation error", with jiff's actual diagnosis captured in a field that
+/// was never rendered.
+#[test]
+fn a_range_limit_failure_explains_itself_once() {
+    let provider = JiffProvider::at(utc(2024, 6, 1, 10, 0));
+    let error = provider
+        .parse_expression(parse("in 10000 years", Language::English).expect("the input parses"))
+        .expect_err("10000 years is beyond jiff's range");
+
+    let rendered = error.to_string();
+    assert!(
+        !rendered.contains("Date calculation error: Date calculation error"),
+        "the category must not be repeated: {rendered}"
+    );
+    assert!(
+        rendered.starts_with("Date calculation error: "),
+        "the message should still name the category: {rendered}"
+    );
+    assert!(
+        rendered.contains("range"),
+        "the message should carry the backend's own cause: {rendered}"
+    );
+}

@@ -391,21 +391,36 @@ fn trailing_junk_on_a_keyword_is_a_parse_error() {
 /// Whitespace is a token, not something the lexer throws away: `5 minutes` is a
 /// quantity and `5minutes` is not, and the parser can only tell them apart if
 /// the gap survives lexing.
+///
+/// Note the leading `in`: a bare `<amount> <unit>` is *not* an expression — an
+/// amount only stands alone with `in` or `ago` — so the demonstrating pair has
+/// to carry one. (The docs in `lexer.rs` and `common::space` claimed otherwise.)
 #[test]
 fn whitespace_separates_a_number_from_its_unit() {
     assert_eq!(
-        lex("5 minutes")
+        lex("in 5 minutes")
             .into_iter()
             .map(|(t, _)| t)
             .collect::<Vec<_>>(),
-        vec![Token::Number("5"), Token::Space, Token::Word("minutes")],
+        vec![
+            Token::Word("in"),
+            Token::Space,
+            Token::Number("5"),
+            Token::Space,
+            Token::Word("minutes")
+        ],
     );
     assert_eq!(
-        lex("5minutes")
+        lex("in 5minutes")
             .into_iter()
             .map(|(t, _)| t)
             .collect::<Vec<_>>(),
-        vec![Token::Number("5"), Token::Word("minutes")],
+        vec![
+            Token::Word("in"),
+            Token::Space,
+            Token::Number("5"),
+            Token::Word("minutes")
+        ],
         "the missing gap must be visible to the parser"
     );
 
@@ -417,4 +432,137 @@ fn whitespace_separates_a_number_from_its_unit() {
         parse("in 5minutes", Language::English).is_err(),
         "`in 5minutes` should not parse"
     );
+    assert!(
+        parse("5 minutes", Language::English).is_err(),
+        "a bare quantity is not a time expression"
+    );
+}
+
+// ===== Diagnostics =====
+
+/// An amount too large for `i64` has to say so. The number token used to be
+/// labelled, and chumsky's `LabelledWith` rewrites a custom reason into an
+/// `ExpectedFound` — whose `found` is `None` for a custom reason — so the user
+/// was told "expected number, found end of input" while the offending digits
+/// were underlined.
+#[test]
+fn an_oversized_amount_names_the_overflow_instead_of_denying_the_number() {
+    let error = parse("in 99999999999999999999 minutes", Language::English)
+        .expect_err("20 digits do not fit in an i64");
+
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("too large"),
+        "the message should name the overflow, got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("found end of input"),
+        "the underlined input is a number, not the end of it: {rendered}"
+    );
+}
+
+/// An impossible date must be reported as an impossible date. The grammar's
+/// calendar check used to be a `try_map`, whose error chumsky registers at the
+/// cursor where the parser *started* — so it was discarded in favour of
+/// whichever alternative had read further, and `2024-02-30` was answered with
+/// a complaint about the `-` separator that valid dates accept.
+#[test]
+fn an_impossible_calendar_date_reports_the_calendar_problem() {
+    for (input, language) in [
+        ("2024-02-30", Language::English),
+        ("2024-13-01", Language::English),
+        ("2023-02-29", Language::English),
+        ("31/02/2024", Language::English),
+        ("29/02/2023", Language::English),
+        ("31.02.2024", Language::German),
+        ("2024-02-30", Language::German),
+    ] {
+        let error = parse(input, language).expect_err("not a real calendar date");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("invalid calendar date"),
+            "expected the calendar diagnosis for {input:?} ({language:?}), got: {rendered}"
+        );
+    }
+
+    // ...while the dates that *are* real keep parsing.
+    for input in ["2024-02-29", "29/02/2024", "31/12/2025", "2024-12-31"] {
+        assert!(
+            parse(input, Language::English).is_ok(),
+            "{input:?} is a real date and should parse"
+        );
+    }
+}
+
+/// Rejecting an impossible date must not depend on the message surviving: the
+/// value the validator produced is still discarded.
+#[test]
+fn an_impossible_calendar_date_is_still_rejected_by_every_spelling() {
+    for (input, language) in [
+        ("2024-02-30", Language::English),
+        ("31/02/2024", Language::English),
+        ("30.02.2024", Language::German),
+        ("2024-02-30T12:00:00Z", Language::English),
+    ] {
+        assert!(
+            parse(input, language).is_err(),
+            "{input:?} ({language:?}) must not parse"
+        );
+    }
+}
+
+/// Time components outside the 24-hour clock are diagnosed the same way.
+#[test]
+fn an_impossible_clock_time_reports_the_time_problem() {
+    for input in ["2024-01-15T25:00", "2024-01-15T12:60", "25:00"] {
+        let error = parse(input, Language::English).expect_err("not a real clock time");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("invalid time"),
+            "expected the time diagnosis for {input:?}, got: {rendered}"
+        );
+    }
+}
+
+// ===== Weekday offset arithmetic =====
+
+/// The offsets are weekday numbers in `0..=6` for every caller in the
+/// workspace, but this is a public helper: it used to panic on arguments near
+/// `i64::MIN`/`i64::MAX` in an overflow-checked build.
+#[test]
+fn weekday_offsets_saturate_instead_of_panicking() {
+    for current in [i64::MIN, i64::MIN + 1, -1, 0, 6, i64::MAX - 1, i64::MAX] {
+        for target in [i64::MIN, -1, 0, 6, i64::MAX] {
+            for modifier in [
+                None,
+                Some(WeekdayModifier::Next),
+                Some(WeekdayModifier::This),
+                Some(WeekdayModifier::Last),
+            ] {
+                let _ = calculate_weekday_offset(current, target, modifier);
+            }
+        }
+    }
+}
+
+/// The in-domain answers are unchanged by the saturating rewrite.
+#[test]
+fn weekday_offsets_are_unchanged_for_real_weekdays() {
+    // (current, target, modifier) -> days to add, Monday = 0.
+    for (current, target, modifier, expected) in [
+        (0, 0, None, 0),                         // Monday -> Monday
+        (0, 0, Some(WeekdayModifier::Next), 7),  // next Monday
+        (0, 0, Some(WeekdayModifier::Last), -7), // last Monday
+        (2, 0, None, 5),                         // Wednesday -> Monday
+        (2, 0, Some(WeekdayModifier::Last), -2), // last Monday
+        (0, 2, Some(WeekdayModifier::Next), 2),  // next Wednesday
+        (6, 0, Some(WeekdayModifier::This), -6), // this Monday, asked on Sunday
+        (3, 3, Some(WeekdayModifier::This), 0),  // this Thursday, asked on Thursday
+    ] {
+        assert_eq!(
+            calculate_weekday_offset(current, target, modifier),
+            expected,
+            "current={current} target={target} modifier={modifier:?}"
+        );
+    }
 }

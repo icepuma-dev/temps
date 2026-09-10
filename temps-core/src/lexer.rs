@@ -35,8 +35,9 @@ pub enum Token<'a> {
     Punct(char),
     /// A run of whitespace.
     ///
-    /// Whitespace is significant here: `5 minutes` is a time expression while
-    /// `5minutes` is not, so the tokens have to record where the gaps were.
+    /// Whitespace is significant here: `in 5 minutes` is a time expression
+    /// while `in 5minutes` is not, so the tokens have to record where the gaps
+    /// were.
     Space,
 }
 

@@ -8,6 +8,7 @@ use crate::{
         phrases_ci, phrases_cs, punct, space, token_stream, two_digit_number, word_ci,
     },
     error::rich_errors_to_temps_error,
+    errors::{INVALID_CALENDAR_DATE, INVALID_TIME_OF_DAY},
     lexer::lex,
     time_utils,
 };
@@ -181,13 +182,12 @@ where
         .then_ignore(punct(':'))
         .then(two_digit_number())
         .then(punct(':').ignore_then(two_digit_number()).or_not())
-        .try_map(|((hour, minute), second), span| {
+        .validate(|((hour, minute), second), extra, emitter| {
             let second = second.unwrap_or(0);
-            if time_utils::is_valid_24_hour_time(hour, minute, second) {
-                Ok((hour, minute, second))
-            } else {
-                Err(Rich::custom(span, "invalid time"))
+            if !time_utils::is_valid_24_hour_time(hour, minute, second) {
+                emitter.emit(Rich::custom(extra.span(), INVALID_TIME_OF_DAY));
             }
+            (hour, minute, second)
         })
 }
 
@@ -299,12 +299,14 @@ where
         .then(two_digit_number())
         .then_ignore(punct('.'))
         .then(four_digit_number())
-        .try_map(|((day, month), year), span| {
-            if time_utils::is_valid_calendar_date(year, month, day) {
-                Ok(TimeExpression::Date(StandardDate { day, month, year }))
-            } else {
-                Err(Rich::custom(span, "invalid calendar date"))
+        .validate(|((day, month), year), extra, emitter| {
+            // Emitted rather than returned so the diagnostic survives chumsky's
+            // furthest-error ranking; see the ISO date validator in
+            // `temps_core::common`.
+            if !time_utils::is_valid_calendar_date(year, month, day) {
+                emitter.emit(Rich::custom(extra.span(), INVALID_CALENDAR_DATE));
             }
+            TimeExpression::Date(StandardDate { day, month, year })
         })
 }
 

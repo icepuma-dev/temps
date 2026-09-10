@@ -572,7 +572,21 @@ pub mod errors {
     pub const ERR_MIDNIGHT_FAILED: &str = "Failed to create midnight time";
 
     /// Error message for date calculation errors
-    pub const ERR_DATE_CALC_ERROR: &str = "Date calculation error";
+    ///
+    /// This is the `message` of a [`TempsError::DateCalculationError`], whose
+    /// `Display` already prefixes it with "Date calculation error: ". The text
+    /// here must therefore not repeat that phrase — it used to read
+    /// "Date calculation error", which rendered as the doubled, cause-less
+    /// "Date calculation error: Date calculation error".
+    pub const ERR_DATE_CALC_ERROR: &str = "Failed to apply the requested time span";
+
+    /// Parse diagnostic for a date whose components are not a real calendar
+    /// date, such as `2024-02-30` or `31/02/2024`.
+    pub const INVALID_CALENDAR_DATE: &str = "invalid calendar date";
+
+    /// Parse diagnostic for time components outside the 24-hour clock, such as
+    /// `2024-01-15T25:00`.
+    pub const INVALID_TIME_OF_DAY: &str = "invalid time";
 
     /// Error message for timezone conversion errors
     pub const ERR_TIMEZONE_CONVERSION: &str = "Timezone conversion error";
@@ -706,7 +720,11 @@ pub mod time_utils {
         target_day_offset: i64,
         modifier: Option<WeekdayModifier>,
     ) -> i64 {
-        let days_diff = target_day_offset - current_day_offset;
+        // Saturating arithmetic: both offsets are weekday numbers in `0..=6` for
+        // every in-tree caller (chrono's and jiff's `num_days_from_monday`), but
+        // this is a public helper, and a plain `-` panicked on `i64::MIN`/
+        // `i64::MAX` arguments in an overflow-checked build.
+        let days_diff = target_day_offset.saturating_sub(current_day_offset);
 
         match modifier {
             None => {
@@ -714,7 +732,7 @@ pub mod time_utils {
                 if days_diff >= 0 {
                     days_diff
                 } else {
-                    7 + days_diff
+                    7_i64.saturating_add(days_diff)
                 }
             }
             Some(WeekdayModifier::Next) => {
@@ -722,7 +740,7 @@ pub mod time_utils {
                 if days_diff > 0 {
                     days_diff
                 } else {
-                    7 + days_diff
+                    7_i64.saturating_add(days_diff)
                 }
             }
             Some(WeekdayModifier::This) => {
@@ -734,7 +752,7 @@ pub mod time_utils {
                 if days_diff < 0 {
                     days_diff
                 } else {
-                    days_diff - 7
+                    days_diff.saturating_sub(7)
                 }
             }
         }
@@ -791,6 +809,7 @@ pub mod time_utils {
 /// ```
 pub mod common {
     use super::{AbsoluteTime, TimeExpression, Timezone, time_utils};
+    use crate::errors::{INVALID_CALENDAR_DATE, INVALID_TIME_OF_DAY};
     use crate::lexer::{Token, lex};
     use chumsky::{input::ValueInput, prelude::*};
 
@@ -847,9 +866,10 @@ pub mod common {
     /// Match exactly one [`Token::Space`].
     ///
     /// Whitespace is a token rather than something skipped implicitly because
-    /// `5 minutes` is a time expression and `5minutes` is not. A `Space` token
-    /// stands for a whole run of whitespace, so this also covers the repeated
-    /// `one_of(" \t\n\r").at_least(1)` the character-level grammar used.
+    /// `in 5 minutes` is a time expression and `in 5minutes` is not. A `Space`
+    /// token stands for a whole run of whitespace, so this also covers the
+    /// repeated `one_of(" \t\n\r").at_least(1)` the character-level grammar
+    /// used.
     pub fn space<'t, 's: 't, I>() -> impl Parser<'t, I, (), ParserError<'t, 's>> + Clone
     where
         I: TokenInput<'t, 's>,
@@ -1059,17 +1079,30 @@ pub mod common {
     // ----- Numbers -----
 
     /// Parse a [`Token::Number`] of any width as an `i64`.
+    ///
+    /// The range check is *emitted* rather than returned. A returned custom
+    /// error is registered at the cursor where this parser started, so the
+    /// enclosing `number()` table's `.labelled("number")` rewrites it — and
+    /// `Rich::label_with` takes `found` from `take_found()`, which is `None` for
+    /// a custom reason. An out-of-range amount therefore used to be reported as
+    /// "expected number, found end of input" *while the offending digits were
+    /// underlined*. Emitted errors are exempt from both the furthest-error
+    /// ranking and the relabelling, and `into_result` still fails the parse.
     pub fn digit_number<'t, 's: 't, I>() -> impl Parser<'t, I, i64, ParserError<'t, 's>> + Clone
     where
         I: TokenInput<'t, 's>,
     {
-        select! { Token::Number(digits) => digits }
-            .try_map(|digits: &str, span| {
-                digits
-                    .parse::<i64>()
-                    .map_err(|e| Rich::custom(span, e.to_string()))
-            })
-            .labelled("number")
+        select! { Token::Number(digits) => digits }.validate(|digits: &str, extra, emitter| {
+            match digits.parse::<i64>() {
+                Ok(value) => value,
+                Err(error) => {
+                    emitter.emit(Rich::custom(extra.span(), error.to_string()));
+                    // The parse fails on the emitted error above, so this value
+                    // only has to be representable.
+                    i64::MAX
+                }
+            }
+        })
     }
 
     /// Parse a 1 or 2 digit [`Token::Number`] as a `u8`.
@@ -1174,12 +1207,21 @@ pub mod common {
             .then(two_digit_number())
             .then_ignore(punct('-'))
             .then(two_digit_number())
-            .try_map(|((year, month), day), span| {
-                if time_utils::is_valid_calendar_date(year, month, day) {
-                    Ok((year, month, day))
-                } else {
-                    Err(Rich::custom(span, "invalid calendar date"))
+            .validate(|((year, month), day), extra, emitter| {
+                if !time_utils::is_valid_calendar_date(year, month, day) {
+                    // Emit instead of failing with `try_map`. A `try_map` error
+                    // is registered at the cursor where the mapped parser
+                    // *started*, and chumsky keeps the competing alternative
+                    // that reached furthest — so the deliberate diagnostic was
+                    // silently replaced by an unrelated "expected whitespace,
+                    // found `-`" from an alternative that had merely read the
+                    // year as an amount. Emitted errors are exempt from that
+                    // ranking, and `ParseResult::into_result` still fails the
+                    // parse because it discards output whenever any error
+                    // exists, so the date is rejected exactly as before.
+                    emitter.emit(Rich::custom(extra.span(), INVALID_CALENDAR_DATE));
                 }
+                (year, month, day)
             });
 
         // The date/time separator is either the ISO `T` designator — lexed as a
@@ -1197,13 +1239,15 @@ pub mod common {
                     .or_not(),
             )
             .then(timezone().or_not())
-            .try_map(|(((hour, minute), sec_part), tz), span| {
+            .validate(|(((hour, minute), sec_part), tz), extra, emitter| {
                 let second = sec_part.as_ref().map_or(0, |(s, _)| *s);
-                if time_utils::is_valid_24_hour_time(hour, minute, second) {
-                    Ok((hour, minute, sec_part, tz))
-                } else {
-                    Err(Rich::custom(span, "invalid time"))
+                if !time_utils::is_valid_24_hour_time(hour, minute, second) {
+                    // Emitted for the same reason as the calendar-date check
+                    // above: a `try_map` failure here loses chumsky's
+                    // furthest-error ranking to an unrelated alternative.
+                    emitter.emit(Rich::custom(extra.span(), INVALID_TIME_OF_DAY));
                 }
+                (hour, minute, sec_part, tz)
             });
 
         date.then(time.or_not())

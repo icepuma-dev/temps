@@ -10,17 +10,17 @@
 use temps::chrono::{parse_to_datetime, Language};
 
 // English
-let dt = parse_to_datetime("in 3 hours", Language::English)?;
-let dt = parse_to_datetime("5 minutes ago", Language::English)?;
-let dt = parse_to_datetime("tomorrow", Language::English)?;
-let dt = parse_to_datetime("next monday", Language::English)?;
-let dt = parse_to_datetime("2024-12-25T15:30:00Z", Language::English)?;
+let dt = parse_to_datetime("in 3 hours", Language::English).unwrap();
+let dt = parse_to_datetime("5 minutes ago", Language::English).unwrap();
+let dt = parse_to_datetime("tomorrow", Language::English).unwrap();
+let dt = parse_to_datetime("next monday", Language::English).unwrap();
+let dt = parse_to_datetime("2024-12-25T15:30:00Z", Language::English).unwrap();
 
 // German  
-let dt = parse_to_datetime("in 3 Stunden", Language::German)?;
-let dt = parse_to_datetime("vor 5 Minuten", Language::German)?;
-let dt = parse_to_datetime("morgen", Language::German)?;
-let dt = parse_to_datetime("nächsten Montag", Language::German)?;
+let dt = parse_to_datetime("in 3 Stunden", Language::German).unwrap();
+let dt = parse_to_datetime("vor 5 Minuten", Language::German).unwrap();
+let dt = parse_to_datetime("morgen", Language::German).unwrap();
+let dt = parse_to_datetime("nächsten Montag", Language::German).unwrap();
 ```
 
 ## Features
@@ -40,10 +40,10 @@ let dt = parse_to_datetime("nächsten Montag", Language::German)?;
 ```toml
 [dependencies]
 # With chrono
-temps = { version = "4", features = ["chrono"] }
+temps = { version = "5", features = ["chrono"] }
 
 # With jiff
-temps = { version = "4", features = ["jiff"] }
+temps = { version = "5", features = ["jiff"] }
 ```
 
 ## Usage
@@ -54,32 +54,32 @@ temps = { version = "4", features = ["jiff"] }
 use temps::chrono::{parse_to_datetime, Language};
 
 // Relative times
-let meeting = parse_to_datetime("in 2 hours", Language::English)?;
-let deadline = parse_to_datetime("in 3 days", Language::English)?;
-let reminder = parse_to_datetime("in 30 Minuten", Language::German)?;
+let meeting = parse_to_datetime("in 2 hours", Language::English).unwrap();
+let deadline = parse_to_datetime("in 3 days", Language::English).unwrap();
+let reminder = parse_to_datetime("in 30 Minuten", Language::German).unwrap();
 
 // Day references
-let today = parse_to_datetime("today", Language::English)?;
-let tomorrow = parse_to_datetime("morgen", Language::German)?;
+let today = parse_to_datetime("today", Language::English).unwrap();
+let tomorrow = parse_to_datetime("morgen", Language::German).unwrap();
 
 // Weekdays
-let next_meeting = parse_to_datetime("next tuesday", Language::English)?;
-let last_friday = parse_to_datetime("last friday", Language::English)?;
+let next_meeting = parse_to_datetime("next tuesday", Language::English).unwrap();
+let last_friday = parse_to_datetime("last friday", Language::English).unwrap();
 
 // Times
-let afternoon = parse_to_datetime("3:30 pm", Language::English)?;
-let morning = parse_to_datetime("09:00", Language::German)?;
+let afternoon = parse_to_datetime("3:30 pm", Language::English).unwrap();
+let morning = parse_to_datetime("09:00", Language::German).unwrap();
 
 // Combined day and time
-let appointment = parse_to_datetime("tomorrow at 2:00 pm", Language::English)?;
-let termin = parse_to_datetime("Montag um 15:30", Language::German)?;
+let appointment = parse_to_datetime("tomorrow at 2:00 pm", Language::English).unwrap();
+let termin = parse_to_datetime("Montag um 15:30", Language::German).unwrap();
 
 // Date formats
-let birthday = parse_to_datetime("15/03/2024", Language::English)?;
-let holiday = parse_to_datetime("24.12.2024", Language::German)?;
+let birthday = parse_to_datetime("15/03/2024", Language::English).unwrap();
+let holiday = parse_to_datetime("24.12.2024", Language::German).unwrap();
 
 // Absolute times
-let christmas = parse_to_datetime("2024-12-25T00:00:00Z", Language::English)?;
+let christmas = parse_to_datetime("2024-12-25T00:00:00Z", Language::English).unwrap();
 ```
 
 ### Supported Formats
@@ -111,7 +111,7 @@ let christmas = parse_to_datetime("2024-12-25T00:00:00Z", Language::English)?;
 - German: `15.03.2024` (DD.MM.YYYY)
 
 **Special keywords**:
-- English: `now`
+- English: `now`, `later today`
 - German: `jetzt`
 
 **ISO 8601**: `2024-01-15T10:30:00Z`
@@ -124,7 +124,7 @@ Time units: seconds, minutes, hours, days, weeks, months, years
 // Direct parser access
 use temps_core::{parse, Language, TimeExpression};
 
-let expr = parse("in 3 hours", Language::English)?;
+let expr = parse("in 3 hours", Language::English).unwrap();
 match expr {
     TimeExpression::Relative(rel) => println!("{} {:?} {:?}", rel.amount, rel.unit, rel.direction),
     TimeExpression::Absolute(abs) => println!("ISO date: {:04}-{:02}-{:02}", abs.year, abs.month, abs.day),
@@ -133,6 +133,7 @@ match expr {
     TimeExpression::Time(time) => println!("Time: {:02}:{:02}", time.hour, time.minute),
     TimeExpression::DayTime(dt) => println!("Day + time: {:?} at {:02}:{:02}", dt.day, dt.time.hour, dt.time.minute),
     TimeExpression::Date(date) => println!("Date: {:02}/{:02}/{:04}", date.day, date.month, date.year),
+    TimeExpression::LaterToday => println!("Later today!"),
 }
 ```
 

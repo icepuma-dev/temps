@@ -8,6 +8,7 @@ use crate::{
         phrase_ci, phrases_ci, punct, space, token_stream, two_digit_number, word_ci,
     },
     error::rich_errors_to_temps_error,
+    errors::{INVALID_CALENDAR_DATE, INVALID_TIME_OF_DAY},
     lexer::lex,
     time_utils,
 };
@@ -242,13 +243,15 @@ where
         .then(two_digit_number())
         .then(punct(':').ignore_then(two_digit_number()).or_not())
         .then(opt_space().ignore_then(meridiem()).or_not())
-        .try_map(|(((hour, minute), second), mer), span| {
+        .validate(|(((hour, minute), second), mer), extra, emitter| {
             let second = second.unwrap_or(0);
-            if time_utils::is_valid_time(hour, minute, second, mer) {
-                Ok((hour, minute, second, mer))
-            } else {
-                Err(Rich::custom(span, "invalid time"))
+            // Emitted, not returned: a `try_map` error is registered where the
+            // parser started and loses chumsky's furthest-error ranking, so
+            // `25:00` was answered with a complaint about the `:` separator.
+            if !time_utils::is_valid_time(hour, minute, second, mer) {
+                emitter.emit(Rich::custom(extra.span(), INVALID_TIME_OF_DAY));
             }
+            (hour, minute, second, mer)
         })
 }
 
@@ -259,12 +262,11 @@ where
 {
     two_digit_number()
         .then(opt_space().ignore_then(meridiem()))
-        .try_map(|(hour, mer), span| {
-            if time_utils::is_valid_time(hour, 0, 0, Some(mer)) {
-                Ok((hour, 0, 0, Some(mer)))
-            } else {
-                Err(Rich::custom(span, "invalid time"))
+        .validate(|(hour, mer), extra, emitter| {
+            if !time_utils::is_valid_time(hour, 0, 0, Some(mer)) {
+                emitter.emit(Rich::custom(extra.span(), INVALID_TIME_OF_DAY));
             }
+            (hour, 0, 0, Some(mer))
         })
 }
 
@@ -282,12 +284,11 @@ where
     I: TokenInput<'t, 's>,
 {
     choice((
-        two_digit_number().try_map(|h, span| {
-            if h <= 23 {
-                Ok(h)
-            } else {
-                Err(Rich::custom(span, "hour must be 0-23"))
+        two_digit_number().validate(|h, extra, emitter| {
+            if h > 23 {
+                emitter.emit(Rich::custom(extra.span(), "hour must be 0-23"));
             }
+            h
         }),
         word_ci("noon").to(12u8),
         word_ci("midnight").to(0u8),
@@ -648,12 +649,17 @@ where
         .then(two_digit_number())
         .then(separator)
         .then(four_digit_number())
-        .try_map(|((((day, first), month), second), year), span| {
-            if first == second && time_utils::is_valid_calendar_date(year, month, day) {
-                Ok(TimeExpression::Date(StandardDate { day, month, year }))
-            } else {
-                Err(Rich::custom(span, "invalid date"))
+        .validate(|((((day, first), month), second), year), extra, emitter| {
+            if first != second || !time_utils::is_valid_calendar_date(year, month, day) {
+                // Emitted, not returned: a `try_map` error would be registered
+                // at the cursor where this parser started and lose chumsky's
+                // furthest-error ranking to an unrelated alternative, leaving
+                // the caller with a caret on a separator that valid dates
+                // accept. `into_result` still fails because an emitted error
+                // discards the output.
+                emitter.emit(Rich::custom(extra.span(), INVALID_CALENDAR_DATE));
             }
+            TimeExpression::Date(StandardDate { day, month, year })
         })
 }
 

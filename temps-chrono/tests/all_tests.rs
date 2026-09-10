@@ -6,7 +6,9 @@
 //! assert that the duplicate is self-consistent, and drifts away from the code
 //! it is supposed to guard.
 
-use chrono::{DateTime, Datelike, Days, Duration, Local, Offset, TimeZone, Timelike, Utc};
+use chrono::{
+    DateTime, Datelike, Days, Duration, Local, NaiveDate, Offset, TimeZone, Timelike, Utc,
+};
 use temps_chrono::{ChronoProvider, parse_to_datetime};
 use temps_core::*;
 use temps_testhelpers::chrono::{fixed_datetime, test_dates};
@@ -643,6 +645,105 @@ fn invalid_programmatic_inputs_are_rejected() {
     ));
 }
 
+/// A date with no time still honours the zone the expression names.
+///
+/// The timezone field used to be read only when an hour was present, so a
+/// date-only `Absolute` resolved to *local* midnight whatever it said — an
+/// instant a whole zone offset away from the one the value names.
+#[test]
+fn a_date_only_absolute_honours_its_timezone() {
+    let midnight_in = |timezone| {
+        ChronoProvider::new()
+            .parse_expression(TimeExpression::Absolute(AbsoluteTime {
+                year: 2024,
+                month: 1,
+                day: 15,
+                hour: None,
+                minute: None,
+                second: None,
+                nanosecond: None,
+                timezone,
+            }))
+            .expect("a real date resolves")
+            .with_timezone(&Utc)
+    };
+
+    assert_eq!(
+        midnight_in(Some(Timezone::Utc)).to_string(),
+        "2024-01-15 00:00:00 UTC"
+    );
+    assert_eq!(
+        midnight_in(Some(Timezone::Offset {
+            total_minutes: -300
+        }))
+        .to_string(),
+        "2024-01-15 05:00:00 UTC",
+        "-05:00 midnight is five hours after UTC midnight"
+    );
+    assert_eq!(
+        midnight_in(Some(Timezone::Offset { total_minutes: 330 })).to_string(),
+        "2024-01-14 18:30:00 UTC",
+        "+05:30 midnight is the previous UTC day"
+    );
+
+    // No zone named still means local midnight, which is the old behaviour and
+    // stays pinned by `dates_resolve_to_local_midnight`.
+    assert_eq!(
+        midnight_in(None)
+            .with_timezone(&Local)
+            .naive_local()
+            .to_string(),
+        "2024-01-15 00:00:00"
+    );
+}
+
+/// Whatever this API returns must be readable.
+///
+/// A fixed-length shift can land on an instant whose *local* reading falls
+/// outside chrono's `NaiveDateTime` range even though the instant itself is
+/// representable. Such a value used to be returned as `Ok`, and every civil-time
+/// accessor on it — `naive_local`, `date_naive`, `time` — then panicked in the
+/// caller's hands.
+#[test]
+fn a_returned_value_is_always_readable() {
+    let now = Local::now();
+    let provider = ChronoProvider::at(now);
+
+    // The largest whole-hour amount that still parses, plus neighbours: these
+    // are the shifts that reach chrono's absolute range edge.
+    let to_the_edge = (NaiveDate::MAX
+        .and_hms_opt(23, 59, 59)
+        .expect("valid civil time")
+        - now.naive_utc())
+    .num_hours();
+    let mut amounts = vec![
+        1_i64,
+        24,
+        100_000,
+        to_the_edge - 1,
+        to_the_edge,
+        to_the_edge + 1,
+    ];
+    amounts.retain(|amount| *amount > 0);
+
+    for amount in amounts {
+        let expr = parse(&format!("in {amount} hours"), Language::English)
+            .unwrap_or_else(|e| panic!("`in {amount} hours` should parse: {e}"));
+        match provider.parse_expression(expr) {
+            // Rejected as unrepresentable: fine.
+            Err(_) => {}
+            // Accepted: the value has to be usable. Each of these accessors
+            // unwraps its range check internally, so reaching the end of the
+            // loop is the assertion.
+            Ok(resolved) => {
+                let _ = resolved.naive_local();
+                let _ = resolved.date_naive();
+                let _ = resolved.time();
+            }
+        }
+    }
+}
+
 // ===== Zone-dependent behaviour =====
 //
 // `TZ` is process-wide, so a test that sets it would corrupt every test running
@@ -921,5 +1022,193 @@ mod zone_pinned {
                 .to_string(),
             "2011-12-29"
         );
+    }
+
+    /// The *upper* boundary of a fall-back fold is a civil time that occurs
+    /// exactly once, in the post-transition offset — but chrono still reports it
+    /// as `Ambiguous`, and taking its first candidate put the result an hour
+    /// early, on an offset that was not in force at that instant.
+    #[test]
+    #[ignore = "requires TZ=America/New_York; run via us_eastern_suite"]
+    fn us_eastern_fold_upper_boundary_resolves_to_its_only_instant() {
+        // In US Eastern 2024-11-03 01:00-02:00 happens twice; 02:00 happens
+        // once, at EST (-05:00), which is 07:00 UTC.
+        let provider = ChronoProvider::new();
+
+        let boundary = resolve(&provider, "2024-11-03T02:00", Language::English);
+        assert_eq!(
+            boundary.with_timezone(&Utc).to_string(),
+            "2024-11-03 07:00:00 UTC"
+        );
+        assert_eq!(
+            boundary.naive_local().to_string(),
+            "2024-11-03 02:00:00",
+            "the returned value must read back as the wall clock that was asked for"
+        );
+
+        // The day-and-time arms share `resolve_local` and were wrong the same way.
+        let on_the_day = instant_at_utc(2024, 11, 3, 17, 0); // 2024-11-03 12:00 EST
+        assert_eq!(on_the_day.date_naive().to_string(), "2024-11-03");
+        assert_eq!(
+            resolve(
+                &ChronoProvider::at(on_the_day),
+                "today at 02:00",
+                Language::English
+            )
+            .with_timezone(&Utc)
+            .to_string(),
+            "2024-11-03 07:00:00 UTC"
+        );
+
+        let day_before = instant_at_utc(2024, 11, 2, 16, 0); // 2024-11-02 12:00 EDT
+        assert_eq!(day_before.date_naive().to_string(), "2024-11-02");
+        assert_eq!(
+            resolve(
+                &ChronoProvider::at(day_before),
+                "tomorrow at 02:00",
+                Language::English
+            )
+            .with_timezone(&Utc)
+            .to_string(),
+            "2024-11-03 07:00:00 UTC"
+        );
+
+        // A fold *interior* genuinely has two instants, and takes the earlier.
+        let interior = resolve(&provider, "2024-11-03T01:30", Language::English);
+        assert_eq!(
+            interior.with_timezone(&Utc).to_string(),
+            "2024-11-03 05:30:00 UTC",
+            "an ambiguous local time resolves to the earlier instant"
+        );
+    }
+
+    /// Calendar arithmetic landing inside a fold used to be a hard error.
+    /// `DateTime<Local>::checked_add_months` resolves through
+    /// `.and_local_timezone(..).single()`, which is `None` for any ambiguous
+    /// target, so `in 1 month` failed where `in 31 days` — the very same civil
+    /// target — succeeded.
+    #[test]
+    #[ignore = "requires TZ=America/New_York; run via us_eastern_suite"]
+    fn us_eastern_month_arithmetic_lands_in_a_dst_fold() {
+        // 2024-10-03 01:30 EDT; one month later is 2024-11-03 01:30, which
+        // happens twice.
+        let base = instant_at_utc(2024, 10, 3, 5, 30);
+        assert_eq!(base.naive_local().to_string(), "2024-10-03 01:30:00");
+        let provider = ChronoProvider::at(base);
+
+        let by_month = resolve(&provider, "in 1 month", Language::English);
+        let by_days = resolve(&provider, "in 31 days", Language::English);
+        assert_eq!(
+            by_month, by_days,
+            "one month and 31 days name the same civil time and must agree"
+        );
+        assert_eq!(
+            by_month.with_timezone(&Utc).to_string(),
+            "2024-11-03 05:30:00 UTC",
+            "the earlier of the fold's two instants"
+        );
+        assert_eq!(by_month.naive_local().to_string(), "2024-11-03 01:30:00");
+
+        // The past direction has to round-trip.
+        assert_eq!(
+            resolve(
+                &ChronoProvider::at(by_month),
+                "1 month ago",
+                Language::English
+            )
+            .with_timezone(&Utc)
+            .to_string(),
+            base.with_timezone(&Utc).to_string()
+        );
+    }
+
+    /// A clock pinned at chrono's absolute range edge must be answered with an
+    /// error, never a panic: `date_naive`, `time`, `weekday` and `naive_local`
+    /// all unwrap their range check internally. In US Eastern (`-05:00`) it is
+    /// the *minimum* end of the range that a local reading falls off.
+    #[test]
+    #[ignore = "requires TZ=America/New_York; run via us_eastern_suite"]
+    fn us_eastern_extreme_pinned_clocks_error_rather_than_panic() {
+        for (label, civil) in [
+            (
+                "NaiveDate::MIN",
+                NaiveDate::MIN
+                    .and_hms_opt(0, 0, 0)
+                    .expect("valid civil time"),
+            ),
+            (
+                "NaiveDate::MAX",
+                NaiveDate::MAX
+                    .and_hms_opt(23, 59, 59)
+                    .expect("valid civil time"),
+            ),
+        ] {
+            let pinned = Utc.from_utc_datetime(&civil).with_timezone(&Local);
+            let provider = ChronoProvider::at(pinned);
+
+            for input in [
+                "tomorrow",
+                "yesterday",
+                "today",
+                "3:00 pm",
+                "in 1 day",
+                "1 hour ago",
+                "later today",
+                "2024-01-15",
+                "next monday",
+            ] {
+                // Reaching the end of this loop is the assertion — a panic here
+                // is the defect. A value that does come back must be readable.
+                let outcome = try_resolve(&provider, input, Language::English);
+                eprintln!(
+                    "{label} / {input:?} -> {}",
+                    if outcome.is_ok() { "Ok" } else { "Err" }
+                );
+                if let Ok(resolved) = outcome {
+                    let _ = resolved.naive_local();
+                }
+            }
+
+            eprintln!("{label} answered without panicking");
+        }
+    }
+
+    /// A shift can be representable as an instant while its *local* reading is
+    /// not, and every civil-time accessor on the returned value unwraps that
+    /// range check. So a returned value must be readable, and a shift that
+    /// cannot be read back has to be an error.
+    ///
+    /// Note the zone matters here: where the zone database has no entry for an
+    /// instant as extreme as chrono's range edge, `Local` falls back to UTC and
+    /// the local reading is in range after all. The assertion below is therefore
+    /// the invariant rather than a fixed outcome — either an error, or a value
+    /// whose every accessor returns.
+    #[test]
+    #[ignore = "requires TZ=America/New_York; run via us_eastern_suite"]
+    fn us_eastern_a_shift_that_poisons_the_local_view_is_rejected() {
+        // Three hours into chrono's range, then a shift further in: the largest
+        // local reading the zone can absorb is only a few hours wide.
+        let pinned = Utc
+            .from_utc_datetime(
+                &NaiveDate::MIN
+                    .and_hms_opt(3, 0, 0)
+                    .expect("valid civil time"),
+            )
+            .with_timezone(&Local);
+        let provider = ChronoProvider::at(pinned);
+
+        for input in ["in 1 hour", "in 24 hours", "in 100 years", "in 1 second"] {
+            match try_resolve(&provider, input, Language::English) {
+                // Rejected as unreadable: the point of the guard.
+                Err(_) => {}
+                // Accepted: then it must be usable, because these accessors
+                // panic rather than return when the reading is out of range.
+                Ok(resolved) => {
+                    let _ = resolved.naive_local();
+                    let _ = resolved.date_naive();
+                    let _ = resolved.time();
+                }
+            }
+        }
     }
 }

@@ -89,9 +89,10 @@ which commits first and strands the remaining tokens against `end()`.
 
 ### Whitespace
 
-`Token::Space` is a real token, not something skipped implicitly: `5 minutes` parses and
-`5minutes` does not. Use `space()` where a gap is required, `opt_space()` where it is optional,
-and remember that a space inside a `phrase_ci` pattern requires one in the input.
+`Token::Space` is a real token, not something skipped implicitly: `in 5 minutes` parses and
+`in 5minutes` does not. (A bare `5 minutes` is *not* a time expression — an amount only stands alone
+with a leading `in` or a trailing `ago`.) Use `space()` where a gap is required, `opt_space()` where
+it is optional, and remember that a space inside a `phrase_ci` pattern requires one in the input.
 
 ## Testing Guidelines
 

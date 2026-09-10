@@ -20,9 +20,9 @@
 //!
 //! ```toml
 //! [dependencies]
-//! temps = { version = "4", features = ["chrono"] }
+//! temps = { version = "5", features = ["chrono"] }
 //! # or
-//! temps = { version = "4", features = ["jiff"] }
+//! temps = { version = "5", features = ["jiff"] }
 //! ```
 //!
 //! ## Examples
@@ -92,6 +92,15 @@
 //! - `jiff`: Enable jiff datetime backend
 //!
 //! At least one backend must be enabled.
+//!
+//! # README
+//!
+//! The project README is included here so its examples are compiled by
+//! `cargo test --doc`. Nothing else in the workspace imports it — it is only the
+//! `readme` field of the manifest — so without this the published examples can
+//! rot silently: an earlier revision still matched `TimeExpression` with seven
+//! arms after `LaterToday` made it eight, and no build ever noticed.
+#![doc = include_str!("../../README.md")]
 
 /// Chrono backend support.
 ///

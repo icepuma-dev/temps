@@ -78,7 +78,8 @@ use temps_core::{
 /// and relative ones (`in 1 day` from `9999-12-30T12:00`, say) with
 /// `TempsError::DateCalculationError`. This is a range limit of the underlying
 /// library, not a defect: `ChronoProvider` has no equivalent limit and accepts
-/// the same expressions, and it is the one place the two backends disagree.
+/// the same expressions. It is the one range in which the two backends are
+/// expected to differ; everywhere else they are held to the same answers.
 ///
 /// ## Example
 ///
@@ -109,6 +110,12 @@ impl JiffProvider {
     /// relative to this instant, which makes results reproducible — including
     /// around daylight-saving transitions, where behaviour otherwise depends on
     /// the day the code happens to run.
+    ///
+    /// The pinned instant's time zone is also the zone every *zone-less*
+    /// expression resolves in, so a pinned provider is reproducible in its zone
+    /// as well as its instant: `tomorrow at 9:00 am` and `2024-06-02 09:00` name
+    /// the same wall clock and resolve to the same instant. An expression that
+    /// carries its own offset or `Z` is converted into this zone.
     ///
     /// # Examples
     ///
@@ -151,6 +158,45 @@ fn jiff_time_components(
         i32::try_from(nanosecond)
             .map_err(|_| TempsError::backend_error("Invalid nanosecond component", "jiff"))?,
     ))
+}
+
+/// Resolve a civil datetime to an instant, honouring the expression's own zone
+/// when it carried one, and otherwise the provider's zone.
+///
+/// Shared by every `Absolute` shape, so that a date with no time is treated
+/// exactly like a datetime: previously the timezone field was read only when an
+/// hour was present, and a date-only value silently resolved to *provider-zone*
+/// midnight even when it named UTC or an explicit offset.
+fn resolve_with_zone(
+    datetime: jiff::civil::DateTime,
+    timezone: Option<&temps_core::Timezone>,
+    provider_zone: jiff::tz::TimeZone,
+) -> Result<Zoned> {
+    use jiff::tz::{Offset, TimeZone};
+
+    fn converted<E: std::fmt::Display>(result: std::result::Result<Zoned, E>) -> Result<Zoned> {
+        result.map_err(|e| {
+            TempsError::backend_error(format!("{ERR_TIMEZONE_CONVERSION}: {e}"), "jiff")
+        })
+    }
+
+    match timezone {
+        Some(temps_core::Timezone::Utc) => converted(datetime.to_zoned(TimeZone::UTC))
+            .map(|zoned| zoned.with_time_zone(provider_zone)),
+        Some(temps_core::Timezone::Offset { total_minutes }) => {
+            if !is_valid_timezone_offset(temps_core::Timezone::Offset {
+                total_minutes: *total_minutes,
+            }) {
+                return Err(TempsError::invalid_timezone_offset(*total_minutes));
+            }
+
+            let offset = Offset::from_seconds(calculate_timezone_offset_seconds(*total_minutes))
+                .map_err(|_| TempsError::invalid_timezone_offset(*total_minutes))?;
+            converted(datetime.to_zoned(TimeZone::fixed(offset)))
+                .map(|zoned| zoned.with_time_zone(provider_zone))
+        }
+        None => converted(datetime.to_zoned(provider_zone)),
+    }
 }
 
 impl TimeParser for JiffProvider {
@@ -199,7 +245,14 @@ impl TimeParser for JiffProvider {
             }
             TimeExpression::Absolute(abs) => {
                 use jiff::civil::{Date, DateTime, Time};
-                use jiff::tz::{Offset, TimeZone};
+
+                // The zone every zone-less expression resolves against. Reading
+                // `TimeZone::system()` here instead made one pinned provider
+                // answer the same wall clock in two zones — the relative, day
+                // and time arms follow `at(..)`, these arms followed the process
+                // `TZ` — which contradicts `at`'s promise that pinning an
+                // instant makes results reproducible.
+                let provider_zone = self.now().time_zone().clone();
 
                 let (year, month, day) = jiff_date_components(abs.year, abs.month, abs.day)?;
                 let date = Date::new(year, month, day)
@@ -251,54 +304,12 @@ impl TimeParser for JiffProvider {
                         .map_err(|e| TempsError::backend_error(e.to_string(), "jiff"))?;
 
                     let datetime = DateTime::from_parts(date, time);
-
-                    match &abs.timezone {
-                        Some(temps_core::Timezone::Utc) => datetime
-                            .to_zoned(TimeZone::UTC)
-                            .map(|z| z.with_time_zone(TimeZone::system()))
-                            .map_err(|e| {
-                                TempsError::backend_error(
-                                    format!("{ERR_TIMEZONE_CONVERSION}: {e}"),
-                                    "jiff",
-                                )
-                            }),
-                        Some(temps_core::Timezone::Offset { total_minutes }) => {
-                            if !is_valid_timezone_offset(temps_core::Timezone::Offset {
-                                total_minutes: *total_minutes,
-                            }) {
-                                return Err(TempsError::invalid_timezone_offset(*total_minutes));
-                            }
-
-                            let total_seconds = calculate_timezone_offset_seconds(*total_minutes);
-                            let offset = Offset::from_seconds(total_seconds)
-                                .map_err(|_| TempsError::invalid_timezone_offset(*total_minutes))?;
-
-                            datetime
-                                .to_zoned(TimeZone::fixed(offset))
-                                .map(|z| z.with_time_zone(TimeZone::system()))
-                                .map_err(|e| {
-                                    TempsError::backend_error(
-                                        format!("{ERR_TIMEZONE_CONVERSION}: {e}"),
-                                        "jiff",
-                                    )
-                                })
-                        }
-                        None => {
-                            // No timezone specified, treat as system timezone
-                            datetime.to_zoned(TimeZone::system()).map_err(|e| {
-                                TempsError::backend_error(
-                                    format!("{ERR_TIMEZONE_CONVERSION}: {e}"),
-                                    "jiff",
-                                )
-                            })
-                        }
-                    }
+                    resolve_with_zone(datetime, abs.timezone.as_ref(), provider_zone)
                 } else {
-                    // Date only, set time to midnight
+                    // Date only, set time to midnight — in the expression's own
+                    // zone when it named one, rather than silently discarding it.
                     let datetime = date.at(0, 0, 0, 0);
-                    datetime.to_zoned(TimeZone::system()).map_err(|e| {
-                        TempsError::backend_error(format!("{ERR_TIMEZONE_CONVERSION}: {e}"), "jiff")
-                    })
+                    resolve_with_zone(datetime, abs.timezone.as_ref(), provider_zone)
                 }
             }
             TimeExpression::Day(day_ref) => {
@@ -508,7 +519,9 @@ impl TimeParser for JiffProvider {
 
                 jiff_date
                     .at(0, 0, 0, 0)
-                    .to_zoned(jiff::tz::TimeZone::system())
+                    // The provider's zone, matching every other arm — see the
+                    // note on `provider_zone` in the `Absolute` arm.
+                    .to_zoned(self.now().time_zone().clone())
                     .map_err(|e| {
                         TempsError::backend_error(format!("Failed to create date: {e}"), "jiff")
                     })
