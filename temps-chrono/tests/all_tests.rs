@@ -643,6 +643,53 @@ fn invalid_programmatic_inputs_are_rejected() {
         provider.parse_expression(minute_without_hour),
         Err(TempsError::InvalidTime { .. })
     ));
+
+    // ...and neither is a second or a nanosecond without one. Only `minute` used
+    // to be guarded, so these two were silently discarded and the value resolved
+    // to midnight — a supplied component dropped without a word.
+    for (second, nanosecond) in [
+        (Some(30), None),
+        (None, Some(500_000_000)),
+        (Some(59), Some(999_999_999)),
+    ] {
+        let sub_hour_without_hour = TimeExpression::Absolute(AbsoluteTime {
+            year: 2024,
+            month: 1,
+            day: 15,
+            hour: None,
+            minute: None,
+            second,
+            nanosecond,
+            timezone: Some(Timezone::Utc),
+        });
+        assert!(
+            matches!(
+                provider.parse_expression(sub_hour_without_hour),
+                Err(TempsError::InvalidTime { .. })
+            ),
+            "second={second:?} nanosecond={nanosecond:?} with no hour must be rejected, \
+             not resolved to midnight"
+        );
+    }
+
+    // The same components *with* an hour are honoured, so the guard is about the
+    // missing hour and not about the fields themselves.
+    let honoured = provider
+        .parse_expression(TimeExpression::Absolute(AbsoluteTime {
+            year: 2024,
+            month: 1,
+            day: 15,
+            hour: Some(0),
+            minute: None,
+            second: Some(30),
+            nanosecond: None,
+            timezone: Some(Timezone::Utc),
+        }))
+        .expect("a second with an hour is a valid time");
+    assert_eq!(
+        honoured.with_timezone(&Utc).to_string(),
+        "2024-01-15 00:00:30 UTC"
+    );
 }
 
 /// A date with no time still honours the zone the expression names.
@@ -732,13 +779,22 @@ fn a_returned_value_is_always_readable() {
         match provider.parse_expression(expr) {
             // Rejected as unrepresentable: fine.
             Err(_) => {}
-            // Accepted: the value has to be usable. Each of these accessors
-            // unwraps its range check internally, so reaching the end of the
-            // loop is the assertion.
+            // Accepted: the value has to be usable. `naive_local` and
+            // `date_naive` unwrap chrono's range check internally, so reaching
+            // the next line is the assertion.
+            //
+            // `time()` and `weekday()` are deliberately *not* used as the check:
+            // they do not panic when the local reading is out of range, they
+            // quietly wrap — a clock time that never existed, and the weekday of
+            // a local date that does not exist. They would make this test look
+            // stronger while asserting nothing.
             Ok(resolved) => {
-                let _ = resolved.naive_local();
-                let _ = resolved.date_naive();
-                let _ = resolved.time();
+                let civil = resolved.naive_local();
+                assert_eq!(
+                    civil.date(),
+                    resolved.date_naive(),
+                    "the two local-date accessors disagree"
+                );
             }
         }
     }
@@ -1201,12 +1257,12 @@ mod zone_pinned {
             match try_resolve(&provider, input, Language::English) {
                 // Rejected as unreadable: the point of the guard.
                 Err(_) => {}
-                // Accepted: then it must be usable, because these accessors
-                // panic rather than return when the reading is out of range.
+                // Accepted: then it must be usable, because `naive_local` and
+                // `date_naive` unwrap their range check rather than returning
+                // when the local reading is out of range.
                 Ok(resolved) => {
                     let _ = resolved.naive_local();
                     let _ = resolved.date_naive();
-                    let _ = resolved.time();
                 }
             }
         }

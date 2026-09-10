@@ -584,6 +584,11 @@ pub mod errors {
     /// date, such as `2024-02-30` or `31/02/2024`.
     pub const INVALID_CALENDAR_DATE: &str = "invalid calendar date";
 
+    /// Parse diagnostic for a date written with two different separators, such
+    /// as `15/03-2024`. The date itself may be perfectly real, so this must not
+    /// be reported as an invalid calendar date.
+    pub const MISMATCHED_DATE_SEPARATORS: &str = "date separators must match";
+
     /// Parse diagnostic for time components outside the 24-hour clock, such as
     /// `2024-01-15T25:00`.
     pub const INVALID_TIME_OF_DAY: &str = "invalid time";

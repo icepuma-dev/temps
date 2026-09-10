@@ -387,6 +387,48 @@ fn a_minute_without_an_hour_is_an_error() {
         matches!(result, Err(TempsError::InvalidTime { minute: 30, .. })),
         "a minute with no hour should be rejected, got {result:?}"
     );
+
+    // A second or a nanosecond without an hour is the same shape, and used to be
+    // silently discarded: the value resolved to midnight with the supplied
+    // component dropped.
+    for (second, nanosecond) in [
+        (Some(30), None),
+        (None, Some(500_000_000)),
+        (Some(59), Some(999_999_999)),
+    ] {
+        let sub_hour_without_hour =
+            provider.parse_expression(TimeExpression::Absolute(AbsoluteTime {
+                year: 2024,
+                month: 6,
+                day: 15,
+                hour: None,
+                minute: None,
+                second,
+                nanosecond,
+                timezone: Some(Timezone::Utc),
+            }));
+        assert!(
+            matches!(sub_hour_without_hour, Err(TempsError::InvalidTime { .. })),
+            "second={second:?} nanosecond={nanosecond:?} with no hour should be rejected, \
+             got {sub_hour_without_hour:?}"
+        );
+    }
+
+    // With an hour the same component is honoured, so the guard is about the
+    // missing hour rather than about the field.
+    let honoured = provider
+        .parse_expression(TimeExpression::Absolute(AbsoluteTime {
+            year: 2024,
+            month: 6,
+            day: 15,
+            hour: Some(0),
+            minute: None,
+            second: Some(30),
+            nanosecond: None,
+            timezone: Some(Timezone::Utc),
+        }))
+        .expect("a second with an hour is a valid time");
+    assert_eq!(honoured.timestamp().to_string(), "2024-06-15T00:00:30Z");
 }
 
 #[test]

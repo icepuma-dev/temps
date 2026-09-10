@@ -95,12 +95,29 @@
 //!
 //! # README
 //!
-//! The project README is included here so its examples are compiled by
-//! `cargo test --doc`. Nothing else in the workspace imports it — it is only the
-//! `readme` field of the manifest — so without this the published examples can
-//! rot silently: an earlier revision still matched `TimeExpression` with seven
-//! arms after `LaterToday` made it eight, and no build ever noticed.
-#![doc = include_str!("../../README.md")]
+//! The project README is pulled in as crate documentation so that its examples
+//! are compiled by `cargo test --doc`. Nothing else in the workspace imports it
+//! — it is only the `readme` field of the manifest — so without this the
+//! published examples rot silently: an earlier revision still matched
+//! `TimeExpression` with seven arms after `LaterToday` made it eight, and no
+//! build ever noticed.
+//!
+//! Two guards, both load-bearing:
+//!
+//! * **`doctest`**, because the path is only valid in the repository. Cargo
+//!   copies the out-of-package README to the package ROOT, so from the packaged
+//!   `src/lib.rs` the same path resolves one level *above* the tarball —
+//!   `cargo package`'s verify build failed with
+//!   `couldn't read src/../../README.md` until this guard was added. Outside a
+//!   doctest run the path is never resolved, and the README still reaches
+//!   docs.rs through the manifest's `readme` field.
+//! * **the `chrono` feature**, because the README's first examples import
+//!   `temps::chrono` and `temps-core`. Ungated, they turned a feature-less
+//!   `cargo test --doc` from green into three compile failures.
+#![cfg_attr(
+    all(doctest, feature = "chrono"),
+    doc = include_str!("../../README.md")
+)]
 
 /// Chrono backend support.
 ///

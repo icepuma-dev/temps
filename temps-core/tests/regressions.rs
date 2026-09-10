@@ -524,6 +524,73 @@ fn an_impossible_clock_time_reports_the_time_problem() {
     }
 }
 
+/// A fractional expression with an impossible hour has to keep the reason
+/// `raw_hour` emitted. `fractional_time` used to close with its own `try_map`,
+/// which failed the whole alternative — and chumsky rolls emitted errors back
+/// when their branch fails, so the deliberate "hour must be 0-23" was discarded
+/// and the user got the generic list of every top-level alternative instead.
+#[test]
+fn a_fractional_time_with_an_impossible_hour_keeps_its_reason() {
+    for input in ["half past 25", "quarter past 24", "quarter to 26"] {
+        let error = parse(input, Language::English).expect_err("hour is out of range");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("hour must be 0-23"),
+            "expected the hour diagnosis for {input:?}, got: {rendered}"
+        );
+    }
+
+    // The valid forms still parse, and still mean what they say. `raw_hour`
+    // takes a digit, `noon` or `midnight` — not a spelled-out hour.
+    for (input, hour, minute) in [
+        ("half past 3", 3, 30),
+        ("quarter past 3", 3, 15),
+        ("quarter to 4", 3, 45),
+        ("quarter to 12", 11, 45),
+        ("quarter to noon", 11, 45),
+        ("half past midnight", 0, 30),
+    ] {
+        match parse(input, Language::English) {
+            Ok(TimeExpression::Time(time)) => assert_eq!(
+                (time.hour, time.minute),
+                (hour, minute),
+                "{input:?} resolved to the wrong clock time"
+            ),
+            other => panic!("{input:?} should be a plain time, got {other:?}"),
+        }
+    }
+}
+
+/// A real date written with two different separators is not an impossible date,
+/// and must not be told that it is: `15/03-2024` names 15 March 2024, and the
+/// only wrong thing about it is the `-`.
+#[test]
+fn mismatched_date_separators_are_not_reported_as_an_impossible_date() {
+    for input in ["15/03-2024", "15-03/2024", "31/12-2025"] {
+        let error = parse(input, Language::English).expect_err("mixed separators are rejected");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("date separators must match"),
+            "expected a separator diagnosis for {input:?}, got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("invalid calendar date"),
+            "{input:?} names a real date; the separators are the problem: {rendered}"
+        );
+    }
+
+    // Genuinely impossible dates still say so.
+    for input in ["31/02/2024", "2024-02-30"] {
+        let rendered = parse(input, Language::English)
+            .expect_err("not a real date")
+            .to_string();
+        assert!(
+            rendered.contains("invalid calendar date"),
+            "expected the calendar diagnosis for {input:?}, got: {rendered}"
+        );
+    }
+}
+
 // ===== Weekday offset arithmetic =====
 
 /// The offsets are weekday numbers in `0..=6` for every caller in the

@@ -8,7 +8,7 @@ use crate::{
         phrase_ci, phrases_ci, punct, space, token_stream, two_digit_number, word_ci,
     },
     error::rich_errors_to_temps_error,
-    errors::{INVALID_CALENDAR_DATE, INVALID_TIME_OF_DAY},
+    errors::{INVALID_CALENDAR_DATE, INVALID_TIME_OF_DAY, MISMATCHED_DATE_SEPARATORS},
     lexer::lex,
     time_utils,
 };
@@ -322,13 +322,15 @@ where
             }
         });
 
-    choice((half_past, quarter_past, quarter_to)).try_map(|(hour, minute, second, mer), span| {
-        if time_utils::is_valid_time(hour, minute, second, mer) {
-            Ok((hour, minute, second, mer))
-        } else {
-            Err(Rich::custom(span, "invalid time"))
-        }
-    })
+    // Deliberately no closing `try_map` re-checking `is_valid_time`: the only
+    // way this tuple can be invalid is an hour above 23, and `raw_hour` has
+    // already *emitted* that reason. A returned error here failed the whole
+    // alternative, and chumsky rolls emitted errors back when their branch
+    // fails — so the emit was unreachable and the user got the generic
+    // "expected one of ... found `half`" instead of "hour must be 0-23".
+    // Emitting and succeeding keeps that diagnostic alive; `into_result` still
+    // rejects the input.
+    choice((half_past, quarter_past, quarter_to))
 }
 
 fn time_expr<'t, 's: 't, I>() -> impl Parser<'t, I, TimeExpression, ParserError<'t, 's>> + Clone
@@ -650,7 +652,13 @@ where
         .then(separator)
         .then(four_digit_number())
         .validate(|((((day, first), month), second), year), extra, emitter| {
-            if first != second || !time_utils::is_valid_calendar_date(year, month, day) {
+            // Two distinct problems, two distinct messages. They used to share
+            // one `invalid calendar date`, which meant `15/03-2024` — a real date
+            // written with mismatched separators — was reported as a date that
+            // does not exist, with the only actually-wrong character unmentioned.
+            if first != second {
+                emitter.emit(Rich::custom(extra.span(), MISMATCHED_DATE_SEPARATORS));
+            } else if !time_utils::is_valid_calendar_date(year, month, day) {
                 // Emitted, not returned: a `try_map` error would be registered
                 // at the cursor where this parser started and lose chumsky's
                 // furthest-error ranking to an unrelated alternative, leaving

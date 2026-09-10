@@ -57,11 +57,13 @@ use chrono::{
 /// The local civil time of `instant`, or `None` when the zone offset would push
 /// it outside chrono's `NaiveDateTime` range.
 ///
-/// `DateTime::naive_local`, `date_naive`, `time` and `weekday` all `expect()`
-/// their way past that range check, so a clock pinned within a zone offset of
-/// `NaiveDate::MIN`/`MAX` used to make this `Result`-returning API panic. This
-/// reports the same condition without unwinding, and is exactly what
-/// `naive_local` does internally: add the offset to the UTC reading.
+/// `DateTime::naive_local` and `date_naive` `expect()` their way past that range
+/// check and panic, so a clock pinned within a zone offset of
+/// `NaiveDate::MIN`/`MAX` used to make this `Result`-returning API panic.
+/// `time` and `weekday` are worse rather than safer: they do not panic, they
+/// quietly return a wrapped clock time and the weekday of a local date that does
+/// not exist. This is what `naive_local` does internally — add the offset to the
+/// UTC reading — but it reports the overflow instead of unwinding.
 fn local_civil(instant: DateTime<Local>) -> Option<NaiveDateTime> {
     instant
         .naive_utc()
@@ -384,9 +386,15 @@ impl TimeParser for ChronoProvider {
                     NaiveDate::from_ymd_opt(abs.year as i32, abs.month as u32, abs.day as u32)
                         .ok_or_else(|| TempsError::invalid_date(abs.year, abs.month, abs.day))?;
 
-                if abs.hour.is_none() && abs.minute.is_some() {
-                    // A minute without an hour is not a time we can honour; say so
-                    // rather than silently falling through to midnight.
+                // A sub-hour component without an hour is not a time this can
+                // honour; say so rather than silently falling through to
+                // midnight. `minute` was the only one guarded, so an explicit
+                // `second` or `nanosecond` was quietly dropped and the value
+                // resolved to midnight instead — the same silent discard, one
+                // field further down.
+                if abs.hour.is_none()
+                    && (abs.minute.is_some() || abs.second.is_some() || abs.nanosecond.is_some())
+                {
                     return Err(TempsError::invalid_time(
                         0,
                         abs.minute.unwrap_or(0),

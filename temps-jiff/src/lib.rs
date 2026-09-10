@@ -258,9 +258,15 @@ impl TimeParser for JiffProvider {
                 let date = Date::new(year, month, day)
                     .map_err(|e| TempsError::backend_error(e.to_string(), "jiff"))?;
 
-                if abs.hour.is_none() && abs.minute.is_some() {
-                    // A minute without an hour is not a time we can honour; say so
-                    // rather than silently falling through to midnight.
+                // A sub-hour component without an hour is not a time this can
+                // honour; say so rather than silently falling through to
+                // midnight. `minute` was the only one guarded, so an explicit
+                // `second` or `nanosecond` was quietly dropped and the value
+                // resolved to midnight instead — the same silent discard, one
+                // field further down.
+                if abs.hour.is_none()
+                    && (abs.minute.is_some() || abs.second.is_some() || abs.nanosecond.is_some())
+                {
                     return Err(TempsError::invalid_time(
                         0,
                         abs.minute.unwrap_or(0),
